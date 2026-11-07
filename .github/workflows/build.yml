@@ -10,7 +10,7 @@ jobs:
       - name: Creer le projet
         run: |
           mkdir -p BusinessBrowser && cd BusinessBrowser
-          mkdir -p app/src/main/res/values app/src/main/java/com/businessbrowser
+          mkdir -p app/src/main/res/values app/src/main/res/xml app/src/main/java/com/businessbrowser
           cat > settings.gradle.kts <<'EOF'
           pluginManagement {
               repositories {
@@ -54,8 +54,8 @@ jobs:
                   applicationId = "com.businessbrowser"
                   minSdk = 24
                   targetSdk = 35
-                  versionCode = 3
-                  versionName = "2.1"
+                  versionCode = 1
+                  versionName = "1.0"
               }
 
               compileOptions {
@@ -72,24 +72,43 @@ jobs:
               implementation("androidx.appcompat:appcompat:1.7.0")
               implementation("com.google.android.material:material:1.12.0")
               implementation("androidx.activity:activity-ktx:1.10.1")
-              implementation("androidx.webkit:webkit:1.12.1")
           }
           EOF
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+              <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.media.action.IMAGE_CAPTURE" />
+                  </intent>
+              </queries>
 
               <application
                   android:allowBackup="true"
                   android:label="Business Browser"
                   android:theme="@style/Theme.BusinessBrowser"
-                  android:usesCleartextTraffic="true">
+                  android:usesCleartextTraffic="false">
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="${applicationId}.fileprovider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/file_paths" />
+                  </provider>
+
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
-                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
-                      android:windowSoftInputMode="adjustResize">
+                      android:screenOrientation="portrait">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
@@ -98,262 +117,513 @@ jobs:
               </application>
           </manifest>
           EOF
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Business Browser</string>
+          </resources>
+          EOF
           cat > app/src/main/res/values/styles.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <style name="Theme.BusinessBrowser" parent="Theme.Material3.DayNight.NoActionBar">
-                  <item name="android:statusBarColor">#0A0305</item>
-                  <item name="android:navigationBarColor">#8E1424</item>
-                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#6750A4</item>
+                  <item name="android:navigationBarColor">#FFFFFF</item>
+                  <item name="android:statusBarColor">#FFFFFF</item>
+                  <item name="android:windowLightStatusBar">true</item>
               </style>
           </resources>
+          EOF
+          cat > app/src/main/res/values/colors.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="white">#FFFFFF</color>
+          </resources>
+          EOF
+          cat > app/src/main/res/xml/file_paths.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <cache-path name="photos" path="." />
+          </paths>
           EOF
           cat > app/src/main/java/com/businessbrowser/MainActivity.kt <<'EOF'
           package com.businessbrowser
 
+          import android.Manifest
+          import android.annotation.SuppressLint
           import android.app.AlertDialog
-          import android.graphics.Color
-          import android.graphics.drawable.GradientDrawable
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.provider.MediaStore
+          import android.graphics.Bitmap
           import android.os.Bundle
-          import android.text.InputType
           import android.view.Gravity
-          import android.view.inputmethod.EditorInfo
+          import android.view.View
           import android.webkit.CookieManager
+          import android.webkit.PermissionRequest
+          import android.webkit.ValueCallback
           import android.webkit.WebChromeClient
           import android.webkit.WebResourceRequest
           import android.webkit.WebView
           import android.webkit.WebViewClient
           import android.widget.*
-          import androidx.core.view.ViewCompat
-          import androidx.core.view.WindowInsetsCompat
-          import androidx.webkit.ProfileStore
-          import androidx.webkit.WebViewCompat
-          import androidx.webkit.WebViewFeature
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.core.content.ContextCompat
+          import androidx.core.content.FileProvider
+          import java.io.File
           import org.json.JSONArray
           import org.json.JSONObject
 
-          class Tab(var url: String, var title: String) { var web: WebView? = null }
-          class Group(
-              var name: String, val tabs: MutableList<Tab>, var active: Int = 0,
-              var pid: String = "g" + java.util.UUID.randomUUID().toString().take(8)
+          data class BrowserTab(
+              var id: Long,
+              var title: String,
+              var url: String
           )
 
           class MainActivity : androidx.appcompat.app.AppCompatActivity() {
-              private val groups = mutableListOf<Group>()
-              private var cur = 0
-              private var warned = false
-              private lateinit var groupBar: LinearLayout
-              private lateinit var tabBar: LinearLayout
-              private lateinit var urlBox: EditText
-              private lateinit var content: FrameLayout
-              private val shortcuts = linkedMapOf(
-                  "ChatGPT" to "https://chatgpt.com", "Claude" to "https://claude.ai",
-                  "Gmail" to "https://mail.google.com", "YouTube" to "https://m.youtube.com",
-                  "TikTok" to "https://www.tiktok.com", "Google" to "https://www.google.com")
+              private lateinit var root: LinearLayout
+              private lateinit var tabBar: HorizontalScrollView
+              private lateinit var tabsContainer: LinearLayout
+              private lateinit var address: EditText
+              private lateinit var webContainer: FrameLayout
 
-              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-              private fun grp() = groups[cur]
-              private fun tab() = grp().tabs[grp().active]
-              private fun mk(n: String) = Tab(shortcuts[n]!!, n)
+              private val tabs = mutableListOf<BrowserTab>()
+              private val webViews = mutableMapOf<Long, WebView>()
+              private var activeId: Long = -1L
 
-              override fun onCreate(b: Bundle?) {
-                  super.onCreate(b)
-                  load()
-                  groupBar = LinearLayout(this)
-                  tabBar = LinearLayout(this)
-                  content = FrameLayout(this)
-                  urlBox = EditText(this).apply {
-                      setSingleLine(); textSize = 13f; setTextColor(Color.WHITE)
-                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-                      imeOptions = EditorInfo.IME_ACTION_GO
-                      setPadding(dp(14), dp(8), dp(14), dp(8))
-                      background = GradientDrawable().apply { setColor(0x44000000); cornerRadius = dp(16).toFloat() }
-                      setOnEditorActionListener { _, _, _ ->
-                          val t = tab(); t.url = norm(text.toString().trim()); t.web?.loadUrl(t.url); true
-                      }
-                  }
-                  val root = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                          intArrayOf(0xFF0A0305.toInt(), 0xFF3A0710.toInt(), 0xFF8E1424.toInt()))
-                      addView(row(groupBar) { addGroup() })
-                      addView(row(tabBar) { addTab() })
-                      addView(urlBox, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(8), 0, dp(8), dp(6)) })
-                      addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
-                  }
-                  ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
-                      val s = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
-                      v.setPadding(s.left, s.top, s.right, s.bottom)
-                      insets
-                  }
-                  setContentView(root)
-                  bars(); show()
-              }
+              private var pendingWebRequest: PermissionRequest? = null
+              private var fileCallback: ValueCallback<Array<Uri>>? = null
+              private var cameraUri: Uri? = null
 
-              private fun chip(t: String, sel: Boolean, onLong: (() -> Unit)? = null, click: () -> Unit) = TextView(this).apply {
-                  text = t; setTextColor(Color.WHITE); textSize = 14f; maxLines = 1
-                  setPadding(dp(14), dp(8), dp(14), dp(8))
-                  background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                      if (sel) intArrayOf(0xFFE53950.toInt(), 0xFF9B1226.toInt()) else intArrayOf(0x33FFFFFF, 0x22FFFFFF))
-                      .apply { cornerRadius = dp(18).toFloat() }
-                  layoutParams = LinearLayout.LayoutParams(-2, -2).apply { setMargins(dp(3), 0, dp(3), 0) }
-                  setOnClickListener { click() }
-                  if (onLong != null) setOnLongClickListener { onLong(); true }
-              }
-
-              private fun row(bar: LinearLayout, plus: () -> Unit): LinearLayout {
-                  val sv = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(bar) }
-                  return LinearLayout(this).apply {
-                      gravity = Gravity.CENTER_VERTICAL
-                      setPadding(dp(6), dp(5), dp(6), dp(5))
-                      addView(sv, LinearLayout.LayoutParams(0, -2, 1f))
-                      addView(chip("+", true) { plus() })
+              private val permLauncher = registerForActivityResult(
+                  ActivityResultContracts.RequestMultiplePermissions()
+              ) { results ->
+                  pendingWebRequest?.let { req ->
+                      pendingWebRequest = null
+                      if (results.values.all { it }) req.grant(mediaResources(req)) else req.deny()
                   }
               }
 
-              private fun bars() {
-                  groupBar.removeAllViews(); tabBar.removeAllViews()
-                  groups.forEachIndexed { i, g ->
-                      groupBar.addView(chip(g.name, i == cur, { groupMenu(i) }) { cur = i; bars(); show() })
-                  }
-                  val g = grp()
-                  g.tabs.forEachIndexed { i, t ->
-                      tabBar.addView(chip(t.title.take(16), i == g.active, { closeTab(i) }) { g.active = i; bars(); show() })
-                  }
-              }
-
-              private fun show() {
-                  content.removeAllViews()
-                  val t = tab()
-                  content.addView(webFor(t), FrameLayout.LayoutParams(-1, -1))
-                  urlBox.setText(t.url)
-                  save()
-              }
-
-              private fun webFor(t: Tab): WebView {
-                  t.web?.let { return it }
-                  val w = WebView(this)
-                  if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
-                      try {
-                          ProfileStore.getInstance().getOrCreateProfile(grp().pid)
-                          WebViewCompat.setProfile(w, grp().pid)
-                      } catch (e: Exception) { }
-                  } else if (!warned) {
-                      warned = true
-                      Toast.makeText(this, "Comptes separes non supportes : mets a jour Android System WebView", Toast.LENGTH_LONG).show()
-                  }
-                  with(w.settings) {
-                      javaScriptEnabled = true; domStorageEnabled = true
-                      mediaPlaybackRequiresUserGesture = false
-                      userAgentString = userAgentString.replace("; wv", "")
-                  }
-                  CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
-                  w.webChromeClient = WebChromeClient()
-                  w.webViewClient = object : WebViewClient() {
-                      override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean =
-                          !r.url.scheme.orEmpty().startsWith("http")
-                      override fun onPageFinished(v: WebView?, u: String?) {
-                          if (u == null) return
-                          t.url = u
-                          t.title = v?.title?.takeIf { it.isNotBlank() } ?: t.title
-                          if (t === tab()) urlBox.setText(u)
-                          bars(); save()
-                      }
-                  }
-                  t.web = w
-                  w.loadUrl(t.url)
-                  return w
-              }
-
-              private fun addTab() {
-                  val names = shortcuts.keys.toMutableList().apply { add("Autre adresse…") }
-                  AlertDialog.Builder(this).setTitle("Nouvel onglet").setItems(names.toTypedArray()) { _, i ->
-                      val g = grp()
-                      if (i < shortcuts.size) { g.tabs.add(mk(names[i])); g.active = g.tabs.size - 1; bars(); show() }
-                      else ask("Adresse ou recherche", "") { v -> g.tabs.add(Tab(norm(v), v.take(16))); g.active = g.tabs.size - 1; bars(); show() }
-                  }.show()
-              }
-
-              private fun addGroup() = ask("Nom de l'onglet principal", "") { n ->
-                  groups.add(Group(n, mutableListOf(mk("Google")))); cur = groups.size - 1; bars(); show()
-              }
-
-              private fun closeTab(i: Int) {
-                  val g = grp()
-                  content.removeAllViews()
-                  g.tabs.removeAt(i).web?.destroy()
-                  if (g.tabs.isEmpty()) g.tabs.add(mk("Google"))
-                  if (i < g.active) g.active--
-                  g.active = g.active.coerceIn(0, g.tabs.size - 1)
-                  bars(); show()
-              }
-
-              private fun groupMenu(i: Int) {
-                  AlertDialog.Builder(this).setTitle(groups[i].name).setItems(arrayOf("Renommer", "Supprimer")) { _, w ->
-                      if (w == 0) ask("Nouveau nom", groups[i].name) { groups[i].name = it; bars(); save() }
-                      else if (groups.size > 1) {
-                          content.removeAllViews()
-                          groups[i].tabs.forEach { it.web?.destroy() }
-                          groups.removeAt(i)
-                          if (i < cur) cur--
-                          cur = cur.coerceIn(0, groups.size - 1)
-                          bars(); show()
-                      } else Toast.makeText(this, "Il faut garder au moins un onglet principal", Toast.LENGTH_SHORT).show()
-                  }.show()
-              }
-
-              private fun ask(title: String, init: String, ok: (String) -> Unit) {
-                  val e = EditText(this).apply { setText(init); setSingleLine() }
-                  AlertDialog.Builder(this).setTitle(title).setView(e)
-                      .setPositiveButton("OK") { _, _ -> val v = e.text.toString().trim(); if (v.isNotEmpty()) ok(v) }
-                      .setNegativeButton("Annuler", null).show()
-              }
-
-              private fun norm(s: String) = when {
-                  s.startsWith("http://") || s.startsWith("https://") -> s
-                  !s.contains(" ") && s.contains(".") -> "https://$s"
-                  else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(s, "UTF-8")
-              }
-
-              private fun save() {
-                  val a = JSONArray()
-                  groups.forEach { g ->
-                      val ts = JSONArray()
-                      g.tabs.forEach { ts.put(JSONObject().put("u", it.url).put("h", it.title)) }
-                      a.put(JSONObject().put("n", g.name).put("a", g.active).put("p", g.pid).put("t", ts))
-                  }
-                  getSharedPreferences("bb", 0).edit().putString("g", a.toString()).putInt("c", cur).apply()
-              }
-
-              private fun load() {
-                  val p = getSharedPreferences("bb", 0)
-                  try {
-                      val a = JSONArray(p.getString("g", "[]"))
-                      for (i in 0 until a.length()) {
-                          val o = a.getJSONObject(i); val ts = o.getJSONArray("t")
-                          val tabs = mutableListOf<Tab>()
-                          for (j in 0 until ts.length()) tabs.add(Tab(ts.getJSONObject(j).getString("u"), ts.getJSONObject(j).getString("h")))
-                          if (tabs.isNotEmpty()) {
-                              val g = Group(o.getString("n"), tabs, o.getInt("a").coerceIn(0, tabs.size - 1))
-                              val pp = o.optString("p", "")
-                              if (pp.isNotBlank()) g.pid = pp
-                              groups.add(g)
+              private val fileChooserLauncher = registerForActivityResult(
+                  ActivityResultContracts.StartActivityForResult()
+              ) { result ->
+                  val cb = fileCallback
+                  fileCallback = null
+                  if (cb != null) {
+                      var uris: Array<Uri>? = null
+                      if (result.resultCode == RESULT_OK) {
+                          val data = result.data
+                          val clip = data?.clipData
+                          val single: Uri? = data?.data
+                          val photo: Uri? = cameraUri
+                          uris = when {
+                              clip != null -> Array(clip.itemCount) { clip.getItemAt(it).uri }
+                              single != null -> arrayOf(single)
+                              photo != null -> arrayOf(photo)
+                              else -> null
                           }
                       }
-                  } catch (e: Exception) { groups.clear() }
-                  if (groups.isEmpty()) {
-                      groups.add(Group("Réseaux", mutableListOf(mk("YouTube"), mk("TikTok"))))
-                      groups.add(Group("IA", mutableListOf(mk("ChatGPT"), mk("Claude"))))
+                      cb.onReceiveValue(uris)
                   }
-                  cur = p.getInt("c", 0).coerceIn(0, groups.size - 1)
+              }
+
+              private val prefs by lazy { getSharedPreferences("browser", Context.MODE_PRIVATE) }
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  CookieManager.getInstance().setAcceptCookie(true)
+                  CookieManager.getInstance().setAcceptThirdPartyCookies(WebView(this), true)
+
+                  buildUi()
+                  restoreTabs()
+
+                  if (!hasCameraPermission()) {
+                      permLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+                  }
+              }
+
+              private fun hasCameraPermission() =
+                  ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                      PackageManager.PERMISSION_GRANTED
+
+              private fun mediaResources(req: PermissionRequest): Array<String> =
+                  req.resources.filter {
+                      it == PermissionRequest.RESOURCE_VIDEO_CAPTURE ||
+                          it == PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                  }.toTypedArray()
+
+              private fun askWebPermission(request: PermissionRequest) {
+                  val wantsCam = request.resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
+                  val wantsMic = request.resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
+                  if (!wantsCam && !wantsMic) {
+                      request.deny()
+                      return
+                  }
+                  val host = request.origin?.host ?: "ce site"
+                  val what = listOfNotNull(
+                      if (wantsCam) "la caméra" else null,
+                      if (wantsMic) "le micro" else null
+                  ).joinToString(" et ")
+
+                  AlertDialog.Builder(this)
+                      .setMessage("Autoriser $host à utiliser $what ?")
+                      .setPositiveButton("Autoriser") { _, _ ->
+                          val needed = mutableListOf<String>()
+                          if (wantsCam) needed.add(Manifest.permission.CAMERA)
+                          if (wantsMic) needed.add(Manifest.permission.RECORD_AUDIO)
+                          val missing = needed.filter {
+                              ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+                          }
+                          if (missing.isEmpty()) {
+                              request.grant(mediaResources(request))
+                          } else {
+                              pendingWebRequest = request
+                              permLauncher.launch(missing.toTypedArray())
+                          }
+                      }
+                      .setNegativeButton("Refuser") { _, _ -> request.deny() }
+                      .setOnCancelListener { request.deny() }
+                      .show()
+              }
+
+              private fun openFileChooser(
+                  callback: ValueCallback<Array<Uri>>?,
+                  params: WebChromeClient.FileChooserParams?
+              ): Boolean {
+                  fileCallback?.onReceiveValue(null)
+                  fileCallback = callback
+                  cameraUri = null
+
+                  try {
+                      val cameraIntent: Intent? = if (hasCameraPermission()) {
+                          val photo = File(cacheDir, "photo_${System.currentTimeMillis()}.jpg")
+                          val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", photo)
+                          cameraUri = uri
+                          Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                              putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                              addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                          }
+                      } else {
+                          null
+                      }
+
+                      val launch: Intent = if (params?.isCaptureEnabled == true && cameraIntent != null) {
+                          cameraIntent
+                      } else {
+                          val picker = params?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                              addCategory(Intent.CATEGORY_OPENABLE)
+                              type = "*/*"
+                          }
+                          Intent.createChooser(picker, "Choisir un fichier").apply {
+                              if (cameraIntent != null) {
+                                  putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cameraIntent))
+                              }
+                          }
+                      }
+                      fileChooserLauncher.launch(launch)
+                  } catch (e: Exception) {
+                      fileCallback = null
+                      callback?.onReceiveValue(null)
+                  }
+                  return true
+              }
+
+              private fun buildUi() {
+                  root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(0xFFFFFFFF.toInt())
+                  }
+
+                  val toolbar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(8, 8, 8, 4)
+                  }
+
+                  val back = button("‹") { currentWebView()?.goBack() }
+                  val forward = button("›") { currentWebView()?.goForward() }
+                  val reload = button("↻") { currentWebView()?.reload() }
+
+                  address = EditText(this).apply {
+                      hint = "Rechercher avec Google ou saisir une URL"
+                      isSingleLine = true
+                      setPadding(18, 0, 18, 0)
+                      setSelectAllOnFocus(false)
+                      setOnEditorActionListener { _, _, _ ->
+                          navigateFromAddress()
+                          true
+                      }
+                  }
+
+                  toolbar.addView(back, buttonParams())
+                  toolbar.addView(forward, buttonParams())
+                  toolbar.addView(reload, buttonParams())
+                  toolbar.addView(address, LinearLayout.LayoutParams(0, 48.dp(), 1f))
+
+                  val add = button("+") { addTab("Nouvel onglet", "https://www.google.com/") }
+                  toolbar.addView(add, buttonParams())
+
+                  tabBar = HorizontalScrollView(this).apply {
+                      isHorizontalScrollBarEnabled = false
+                  }
+                  tabsContainer = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(6, 2, 6, 2)
+                  }
+                  tabBar.addView(tabsContainer)
+
+                  webContainer = FrameLayout(this)
+
+                  root.addView(toolbar)
+                  root.addView(tabBar, LinearLayout.LayoutParams(-1, 52.dp()))
+                  root.addView(webContainer, LinearLayout.LayoutParams(-1, 0, 1f))
+                  setContentView(root)
+              }
+
+              private fun button(text: String, action: () -> Unit): TextView =
+                  TextView(this).apply {
+                      this.text = text
+                      textSize = 22f
+                      gravity = Gravity.CENTER
+                      setOnClickListener { action() }
+                      setPadding(8, 0, 8, 0)
+                  }
+
+              private fun buttonParams() = LinearLayout.LayoutParams(42.dp(), 48.dp())
+
+              @SuppressLint("SetJavaScriptEnabled")
+              private fun createWebView(tab: BrowserTab): WebView {
+                  return WebView(this).apply {
+                      settings.javaScriptEnabled = true
+                      settings.domStorageEnabled = true
+                      settings.databaseEnabled = true
+                      settings.setSupportZoom(false)
+                      settings.builtInZoomControls = false
+                      settings.displayZoomControls = false
+                      settings.userAgentString = settings.userAgentString
+
+                      webChromeClient = object : WebChromeClient() {
+                          override fun onPermissionRequest(request: PermissionRequest) {
+                              runOnUiThread { askWebPermission(request) }
+                          }
+
+                          override fun onShowFileChooser(
+                              webView: WebView?,
+                              filePathCallback: ValueCallback<Array<Uri>>?,
+                              fileChooserParams: FileChooserParams?
+                          ): Boolean = openFileChooser(filePathCallback, fileChooserParams)
+
+                          override fun onReceivedTitle(view: WebView?, title: String?) {
+                              title?.takeIf { it.isNotBlank() }?.let {
+                                  tab.title = it.take(28)
+                                  saveTabs()
+                                  renderTabs()
+                              }
+                          }
+                      }
+
+                      webViewClient = object : WebViewClient() {
+                          override fun shouldOverrideUrlLoading(
+                              view: WebView,
+                              request: WebResourceRequest
+                          ): Boolean = false
+
+                          override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                              if (url != null) {
+                                  tab.url = url
+                                  address.setText(url)
+                                  saveTabs()
+                              }
+                          }
+
+                          override fun onPageFinished(view: WebView?, url: String?) {
+                              if (url != null) {
+                                  tab.url = url
+                                  address.setText(url)
+                                  saveTabs()
+                              }
+                          }
+                      }
+
+                      loadUrl(tab.url)
+                  }
+              }
+
+              private fun addTab(title: String, url: String) {
+                  val tab = BrowserTab(System.currentTimeMillis(), title, url)
+                  tabs.add(tab)
+                  createAndShow(tab)
+                  saveTabs()
+              }
+
+              private fun createAndShow(tab: BrowserTab) {
+                  val web = createWebView(tab)
+                  webViews[tab.id] = web
+                  webContainer.addView(web, FrameLayout.LayoutParams(-1, -1))
+                  activeId = tab.id
+                  showActive()
+                  renderTabs()
+              }
+
+              private fun showActive() {
+                  webViews.forEach { (id, view) ->
+                      view.visibility = if (id == activeId) View.VISIBLE else View.GONE
+                  }
+                  tabs.find { it.id == activeId }?.let { address.setText(it.url) }
+              }
+
+              private fun renderTabs() {
+                  tabsContainer.removeAllViews()
+                  tabs.forEach { tab ->
+                      val item = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL
+                          setPadding(14, 0, 4, 0)
+                          setBackgroundColor(if (tab.id == activeId) 0xFFE8DEF8.toInt() else 0xFFF2F2F2.toInt())
+                      }
+
+                      val title = TextView(this).apply {
+                          text = tab.title
+                          textSize = 14f
+                          maxLines = 1
+                          setPadding(0, 0, 8, 0)
+                          setOnClickListener {
+                              activeId = tab.id
+                              showActive()
+                              renderTabs()
+                          }
+                      }
+
+                      val close = TextView(this).apply {
+                          text = "×"
+                          textSize = 18f
+                          setPadding(8, 0, 8, 0)
+                          setOnClickListener { closeTab(tab.id) }
+                      }
+
+                      item.addView(title, LinearLayout.LayoutParams(0, 44.dp(), 1f))
+                      item.addView(close, LinearLayout.LayoutParams(36.dp(), 44.dp()))
+                      tabsContainer.addView(item, LinearLayout.LayoutParams(190.dp(), 44.dp()).apply {
+                          setMargins(4, 0, 4, 0)
+                      })
+                  }
+              }
+
+              private fun closeTab(id: Long) {
+                  val index = tabs.indexOfFirst { it.id == id }
+                  if (index < 0) return
+
+                  webViews.remove(id)?.let {
+                      webContainer.removeView(it)
+                      it.destroy()
+                  }
+                  tabs.removeAt(index)
+
+                  if (tabs.isEmpty()) {
+                      addTab("Google", "https://www.google.com/")
+                      return
+                  }
+
+                  if (activeId == id) {
+                      activeId = tabs.getOrNull(index)?.id ?: tabs.last().id
+                  }
+                  showActive()
+                  renderTabs()
+                  saveTabs()
+              }
+
+              private fun currentWebView() = webViews[activeId]
+
+              private fun navigateFromAddress() {
+                  var value = address.text.toString().trim()
+                  if (value.isEmpty()) return
+
+                  if (!value.startsWith("http://") && !value.startsWith("https://")) {
+                      value = if (value.contains(".") && !value.contains(" ")) {
+                          "https://$value"
+                      } else {
+                          "https://www.google.com/search?q=${java.net.URLEncoder.encode(value, "UTF-8")}"
+                      }
+                  }
+                  currentWebView()?.loadUrl(value)
+              }
+
+              private fun restoreTabs() {
+                  val raw = prefs.getString("tabs", null)
+                  if (raw.isNullOrBlank()) {
+                      addTab("Google", "https://www.google.com/")
+                      return
+                  }
+
+                  try {
+                      val array = JSONArray(raw)
+                      for (i in 0 until array.length()) {
+                          val o = array.getJSONObject(i)
+                          tabs.add(
+                              BrowserTab(
+                                  o.getLong("id"),
+                                  o.optString("title", "Onglet"),
+                                  o.optString("url", "https://www.google.com/")
+                              )
+                          )
+                      }
+                      activeId = prefs.getLong("activeId", tabs.first().id)
+                      tabs.forEach { tab ->
+                          val web = createWebView(tab)
+                          webViews[tab.id] = web
+                          webContainer.addView(web, FrameLayout.LayoutParams(-1, -1))
+                      }
+                      if (tabs.none { it.id == activeId }) activeId = tabs.first().id
+                      showActive()
+                      renderTabs()
+                  } catch (e: Exception) {
+                      tabs.clear()
+                      addTab("Google", "https://www.google.com/")
+                  }
+              }
+
+              private fun saveTabs() {
+                  val array = JSONArray()
+                  tabs.forEach {
+                      array.put(JSONObject().apply {
+                          put("id", it.id)
+                          put("title", it.title)
+                          put("url", it.url)
+                      })
+                  }
+                  prefs.edit()
+                      .putString("tabs", array.toString())
+                      .putLong("activeId", activeId)
+                      .apply()
+              }
+
+              override fun onPause() {
+                  saveTabs()
+                  super.onPause()
+              }
+
+              override fun onDestroy() {
+                  saveTabs()
+                  webViews.values.forEach { it.destroy() }
+                  webViews.clear()
+                  super.onDestroy()
               }
 
               override fun onBackPressed() {
-                  val w = tab().web
-                  if (w != null && w.canGoBack()) w.goBack() else super.onBackPressed()
+                  if (currentWebView()?.canGoBack() == true) {
+                      currentWebView()?.goBack()
+                  } else {
+                      super.onBackPressed()
+                  }
               }
 
-              override fun onPause() { save(); CookieManager.getInstance().flush(); super.onPause() }
+              private fun Int.dp(): Int =
+                  (this * resources.displayMetrics.density).toInt()
           }
           EOF
 
