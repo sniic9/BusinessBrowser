@@ -1,75 +1,354 @@
 name: Build APK
-on: workflow_dispatch
+on:
+  push:
+  workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: "8.7"
-      - name: Write project
+      - name: Creer le projet
         run: |
+          mkdir -p BusinessBrowser && cd BusinessBrowser
+          mkdir -p app/src/main/res/values app/src/main/java/com/businessbrowser
           cat > settings.gradle.kts <<'EOF'
-          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
-          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
           rootProject.name = "BusinessBrowser"
           include(":app")
           EOF
           cat > build.gradle.kts <<'EOF'
           plugins {
-              id("com.android.application") version "8.5.2" apply false
-              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
           }
           EOF
-          mkdir -p app
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
           cat > app/build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
           }
+
           android {
               namespace = "com.businessbrowser"
-              compileSdk = 34
+              compileSdk = 35
+
               defaultConfig {
                   applicationId = "com.businessbrowser"
                   minSdk = 24
-                  targetSdk = 34
+                  targetSdk = 35
                   versionCode = 2
                   versionName = "2.0"
               }
+
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
               }
-              kotlinOptions { jvmTarget = "17" }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.15.0")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("com.google.android.material:material:1.12.0")
+              implementation("androidx.activity:activity-ktx:1.10.1")
           }
           EOF
-          mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.INTERNET"/>
-              <application android:label="Business Browser" android:usesCleartextTraffic="true"
-                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-                  <activity android:name=".MainActivity" android:exported="true"
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="Business Browser"
+                  android:theme="@style/Theme.BusinessBrowser"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
                       android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
                       android:windowSoftInputMode="adjustResize">
                       <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
               </application>
           </manifest>
           EOF
-          mkdir -p app/src/main/kotlin/com/businessbrowser
-          cat > app/src/main/kotlin/com/businessbrowser/MainActivity.kt <<'EOF'
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.BusinessBrowser" parent="Theme.Material3.DayNight.NoActionBar">
+                  <item name="android:statusBarColor">#0A0305</item>
+                  <item name="android:navigationBarColor">#8E1424</item>
+                  <item name="android:windowLightStatusBar">false</item>
+              </style>
+          </resources>
+          EOF
+          cat > app/src/main/java/com/businessbrowser/MainActivity.kt <<'EOF'
           package com.businessbrowser
 
-          import android.app.Activity
           import android.app.AlertDialog
           import android.graphics.Color
-          import android
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.inputmethod.EditorInfo
+          import android.webkit.CookieManager
+          import android.webkit.WebChromeClient
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.*
+          import androidx.core.view.ViewCompat
+          import androidx.core.view.WindowInsetsCompat
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          class Tab(var url: String, var title: String) { var web: WebView? = null }
+          class Group(var name: String, val tabs: MutableList<Tab>, var active: Int = 0)
+
+          class MainActivity : androidx.appcompat.app.AppCompatActivity() {
+              private val groups = mutableListOf<Group>()
+              private var cur = 0
+              private lateinit var groupBar: LinearLayout
+              private lateinit var tabBar: LinearLayout
+              private lateinit var urlBox: EditText
+              private lateinit var content: FrameLayout
+              private val shortcuts = linkedMapOf(
+                  "ChatGPT" to "https://chatgpt.com", "Claude" to "https://claude.ai",
+                  "Gmail" to "https://mail.google.com", "YouTube" to "https://m.youtube.com",
+                  "TikTok" to "https://www.tiktok.com", "Google" to "https://www.google.com")
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun grp() = groups[cur]
+              private fun tab() = grp().tabs[grp().active]
+              private fun mk(n: String) = Tab(shortcuts[n]!!, n)
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  load()
+                  groupBar = LinearLayout(this)
+                  tabBar = LinearLayout(this)
+                  content = FrameLayout(this)
+                  urlBox = EditText(this).apply {
+                      setSingleLine(); textSize = 13f; setTextColor(Color.WHITE)
+                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                      imeOptions = EditorInfo.IME_ACTION_GO
+                      setPadding(dp(14), dp(8), dp(14), dp(8))
+                      background = GradientDrawable().apply { setColor(0x44000000); cornerRadius = dp(16).toFloat() }
+                      setOnEditorActionListener { _, _, _ ->
+                          val t = tab(); t.url = norm(text.toString().trim()); t.web?.loadUrl(t.url); true
+                      }
+                  }
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                          intArrayOf(0xFF0A0305.toInt(), 0xFF3A0710.toInt(), 0xFF8E1424.toInt()))
+                      addView(row(groupBar) { addGroup() })
+                      addView(row(tabBar) { addTab() })
+                      addView(urlBox, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(8), 0, dp(8), dp(6)) })
+                      addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
+                  }
+                  ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+                      val s = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+                      v.setPadding(s.left, s.top, s.right, s.bottom)
+                      insets
+                  }
+                  setContentView(root)
+                  bars(); show()
+              }
+
+              private fun chip(t: String, sel: Boolean, onLong: (() -> Unit)? = null, click: () -> Unit) = TextView(this).apply {
+                  text = t; setTextColor(Color.WHITE); textSize = 14f; maxLines = 1
+                  setPadding(dp(14), dp(8), dp(14), dp(8))
+                  background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                      if (sel) intArrayOf(0xFFE53950.toInt(), 0xFF9B1226.toInt()) else intArrayOf(0x33FFFFFF, 0x22FFFFFF))
+                      .apply { cornerRadius = dp(18).toFloat() }
+                  layoutParams = LinearLayout.LayoutParams(-2, -2).apply { setMargins(dp(3), 0, dp(3), 0) }
+                  setOnClickListener { click() }
+                  if (onLong != null) setOnLongClickListener { onLong(); true }
+              }
+
+              private fun row(bar: LinearLayout, plus: () -> Unit): LinearLayout {
+                  val sv = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(bar) }
+                  return LinearLayout(this).apply {
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(6), dp(5), dp(6), dp(5))
+                      addView(sv, LinearLayout.LayoutParams(0, -2, 1f))
+                      addView(chip("+", true) { plus() })
+                  }
+              }
+
+              private fun bars() {
+                  groupBar.removeAllViews(); tabBar.removeAllViews()
+                  groups.forEachIndexed { i, g ->
+                      groupBar.addView(chip(g.name, i == cur, { groupMenu(i) }) { cur = i; bars(); show() })
+                  }
+                  val g = grp()
+                  g.tabs.forEachIndexed { i, t ->
+                      tabBar.addView(chip(t.title.take(16), i == g.active, { closeTab(i) }) { g.active = i; bars(); show() })
+                  }
+              }
+
+              private fun show() {
+                  content.removeAllViews()
+                  val t = tab()
+                  content.addView(webFor(t), FrameLayout.LayoutParams(-1, -1))
+                  urlBox.setText(t.url)
+                  save()
+              }
+
+              private fun webFor(t: Tab): WebView {
+                  t.web?.let { return it }
+                  val w = WebView(this)
+                  with(w.settings) {
+                      javaScriptEnabled = true; domStorageEnabled = true
+                      mediaPlaybackRequiresUserGesture = false
+                      userAgentString = userAgentString.replace("; wv", "")
+                  }
+                  CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
+                  w.webChromeClient = WebChromeClient()
+                  w.webViewClient = object : WebViewClient() {
+                      override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean =
+                          !r.url.scheme.orEmpty().startsWith("http")
+                      override fun onPageFinished(v: WebView?, u: String?) {
+                          if (u == null) return
+                          t.url = u
+                          t.title = v?.title?.takeIf { it.isNotBlank() } ?: t.title
+                          if (t === tab()) urlBox.setText(u)
+                          bars(); save()
+                      }
+                  }
+                  t.web = w
+                  w.loadUrl(t.url)
+                  return w
+              }
+
+              private fun addTab() {
+                  val names = shortcuts.keys.toMutableList().apply { add("Autre adresse…") }
+                  AlertDialog.Builder(this).setTitle("Nouvel onglet").setItems(names.toTypedArray()) { _, i ->
+                      val g = grp()
+                      if (i < shortcuts.size) { g.tabs.add(mk(names[i])); g.active = g.tabs.size - 1; bars(); show() }
+                      else ask("Adresse ou recherche", "") { v -> g.tabs.add(Tab(norm(v), v.take(16))); g.active = g.tabs.size - 1; bars(); show() }
+                  }.show()
+              }
+
+              private fun addGroup() = ask("Nom de l'onglet principal", "") { n ->
+                  groups.add(Group(n, mutableListOf(mk("Google")))); cur = groups.size - 1; bars(); show()
+              }
+
+              private fun closeTab(i: Int) {
+                  val g = grp()
+                  content.removeAllViews()
+                  g.tabs.removeAt(i).web?.destroy()
+                  if (g.tabs.isEmpty()) g.tabs.add(mk("Google"))
+                  if (i < g.active) g.active--
+                  g.active = g.active.coerceIn(0, g.tabs.size - 1)
+                  bars(); show()
+              }
+
+              private fun groupMenu(i: Int) {
+                  AlertDialog.Builder(this).setTitle(groups[i].name).setItems(arrayOf("Renommer", "Supprimer")) { _, w ->
+                      if (w == 0) ask("Nouveau nom", groups[i].name) { groups[i].name = it; bars(); save() }
+                      else if (groups.size > 1) {
+                          content.removeAllViews()
+                          groups[i].tabs.forEach { it.web?.destroy() }
+                          groups.removeAt(i)
+                          if (i < cur) cur--
+                          cur = cur.coerceIn(0, groups.size - 1)
+                          bars(); show()
+                      } else Toast.makeText(this, "Il faut garder au moins un onglet principal", Toast.LENGTH_SHORT).show()
+                  }.show()
+              }
+
+              private fun ask(title: String, init: String, ok: (String) -> Unit) {
+                  val e = EditText(this).apply { setText(init); setSingleLine() }
+                  AlertDialog.Builder(this).setTitle(title).setView(e)
+                      .setPositiveButton("OK") { _, _ -> val v = e.text.toString().trim(); if (v.isNotEmpty()) ok(v) }
+                      .setNegativeButton("Annuler", null).show()
+              }
+
+              private fun norm(s: String) = when {
+                  s.startsWith("http://") || s.startsWith("https://") -> s
+                  !s.contains(" ") && s.contains(".") -> "https://$s"
+                  else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(s, "UTF-8")
+              }
+
+              private fun save() {
+                  val a = JSONArray()
+                  groups.forEach { g ->
+                      val ts = JSONArray()
+                      g.tabs.forEach { ts.put(JSONObject().put("u", it.url).put("h", it.title)) }
+                      a.put(JSONObject().put("n", g.name).put("a", g.active).put("t", ts))
+                  }
+                  getSharedPreferences("bb", 0).edit().putString("g", a.toString()).putInt("c", cur).apply()
+              }
+
+              private fun load() {
+                  val p = getSharedPreferences("bb", 0)
+                  try {
+                      val a = JSONArray(p.getString("g", "[]"))
+                      for (i in 0 until a.length()) {
+                          val o = a.getJSONObject(i); val ts = o.getJSONArray("t")
+                          val tabs = mutableListOf<Tab>()
+                          for (j in 0 until ts.length()) tabs.add(Tab(ts.getJSONObject(j).getString("u"), ts.getJSONObject(j).getString("h")))
+                          if (tabs.isNotEmpty()) groups.add(Group(o.getString("n"), tabs, o.getInt("a").coerceIn(0, tabs.size - 1)))
+                      }
+                  } catch (e: Exception) { groups.clear() }
+                  if (groups.isEmpty()) {
+                      groups.add(Group("Réseaux", mutableListOf(mk("YouTube"), mk("TikTok"))))
+                      groups.add(Group("IA", mutableListOf(mk("ChatGPT"), mk("Claude"))))
+                  }
+                  cur = p.getInt("c", 0).coerceIn(0, groups.size - 1)
+              }
+
+              override fun onBackPressed() {
+                  val w = tab().web
+                  if (w != null && w.canGoBack()) w.goBack() else super.onBackPressed()
+              }
+
+              override fun onPause() { save(); CookieManager.getInstance().flush(); super.onPause() }
+          }
+          EOF
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Compiler
+        working-directory: BusinessBrowser
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BusinessBrowser-APK
+          path: BusinessBrowser/app/build/outputs/apk/debug/app-debug.apk
